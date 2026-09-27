@@ -31,6 +31,7 @@
   let currentTrackId = null;
   let isAdmin = false;
   let firebaseAuth = null;
+  let authStateReady = false;
   let accountMode = 'login';
   let returnToAdminAfterLogin = false;
   let databasePromise;
@@ -414,10 +415,24 @@
   function openAdmin() {
     const panel = byId('adminPanel');
     const notice = byId('adminSignInNotice');
+    const message = notice.querySelector('.form-note');
+    if (firebaseAuth && !authStateReady) {
+      notice.hidden = false;
+      panel.hidden = true;
+      message.textContent = 'جارٍ التحقق من حالة تسجيل الدخول...';
+      openDialog('adminDialog');
+      return;
+    }
+    if (firebaseAuth && !firebaseAuth.currentUser) {
+      returnToAdminAfterLogin = true;
+      document.querySelector('[data-mode="login"]').click();
+      closeDialog('adminDialog');
+      openAccount();
+      return;
+    }
     notice.hidden = isAdmin;
     panel.hidden = !isAdmin;
     if (!isAdmin) {
-      const message = notice.querySelector('.form-note');
       const user = firebaseAuth?.currentUser;
       if (!firebaseAuth) message.textContent = 'تعذر تهيئة Firebase Authentication. تحقق من تحميل إعدادات Firebase والاتصال بالإنترنت.';
       else if (user) message.textContent = `الحساب مسجل، لكن UID الحالي هو ${user.uid} ولا يطابق UID المشرف المحدد.`;
@@ -439,7 +454,10 @@
     try {
       const app = window.firebase.apps.length ? window.firebase.app() : window.firebase.initializeApp(config);
       firebaseAuth = app.auth();
-      firebaseAuth.onAuthStateChanged(updateAccountUI);
+      firebaseAuth.onAuthStateChanged(user => {
+        authStateReady = true;
+        updateAccountUI(user);
+      });
       return true;
     } catch (error) {
       console.error('تعذر تهيئة Firebase Authentication.', error);
@@ -511,6 +529,7 @@
       openDialog('categoryDialog');
     });
     byId('logoutButton').addEventListener('click', () => {
+      closeDialog('adminDialog');
       if (firebaseAuth) firebaseAuth.signOut().catch(authError => showToast(firebaseAuthError(authError)));
     });
     byId('adminAccountButton').addEventListener('click', () => {
