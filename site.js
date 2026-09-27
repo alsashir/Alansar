@@ -30,6 +30,8 @@
   let visibleTracks = [];
   let currentTrackId = null;
   let isAdmin = false;
+  let firebaseAuth = null;
+  let accountMode = 'login';
   let databasePromise;
   let toastTimer;
   const objectUrls = new Map();
@@ -422,7 +424,51 @@
     openDialog('accountDialog');
   }
 
+  function initializeFirebaseAuth() {
+    const config = window.FIREBASE_CONFIG;
+    const requiredConfig = ['apiKey', 'authDomain', 'projectId', 'appId'];
+    if (!window.firebase || !config || requiredConfig.some(key => !config[key] || config[key].startsWith('YOUR_'))) return false;
+    try {
+      const app = window.firebase.apps.length ? window.firebase.app() : window.firebase.initializeApp(config);
+      firebaseAuth = app.auth();
+      firebaseAuth.onAuthStateChanged(user => updateAccountUI(user?.emailVerified ? user : null));
+      return true;
+    } catch (error) {
+      console.error('تعذر تهيئة Firebase Authentication.', error);
+      return false;
+    }
+  }
+
+  function updateAccountUI(user) {
+    const signedIn = Boolean(user);
+    byId('accountForm').hidden = signedIn;
+    byId('accountModes').hidden = signedIn;
+    byId('userLogoutButton').hidden = !signedIn;
+    const status = byId('userStatus');
+    status.hidden = !signedIn;
+    byId('accountInfoUsername').textContent = signedIn ? (user.displayName || 'غير محدد') : '';
+    byId('accountInfoEmail').textContent = signedIn ? (user.email || '') : '';
+    byId('accountEntry').textContent = signedIn ? (user.displayName || 'حسابي') : 'حسابي';
+    byId('accountDialogTitle').textContent = signedIn ? 'حساب المستخدم' : (accountMode === 'register' ? 'إنشاء حساب' : 'حساب المستخدم');
+  }
+
+  function firebaseAuthError(error) {
+    const messages = {
+      'auth/email-already-in-use': 'هذا البريد مسجل مسبقًا. سجّل الدخول بدلًا من إنشاء حساب جديد.',
+      'auth/invalid-email': 'صيغة البريد الإلكتروني غير صحيحة.',
+      'auth/invalid-credential': 'البريد الإلكتروني أو كلمة المرور غير صحيحة.',
+      'auth/user-not-found': 'لا يوجد حساب بهذا البريد الإلكتروني.',
+      'auth/wrong-password': 'كلمة المرور غير صحيحة.',
+      'auth/weak-password': 'اختر كلمة مرور أقوى من 8 أحرف على الأقل.',
+      'auth/too-many-requests': 'محاولات كثيرة. انتظر قليلًا ثم حاول مجددًا.',
+      'auth/network-request-failed': 'تعذر الاتصال. تحقق من الإنترنت وحاول مجددًا.',
+      'auth/operation-not-allowed': 'فعّل تسجيل البريد وكلمة المرور من إعدادات Firebase Authentication.'
+    };
+    return messages[error.code] || 'تعذر إكمال العملية. تحقق من إعداد Firebase ثم حاول مجددًا.';
+  }
+
   function initialize() {
+    initializeFirebaseAuth();
     const date = byId('todayDate');
     if (date) date.textContent = new Intl.DateTimeFormat('ar', { dateStyle: 'full' }).format(new Date());
 
@@ -481,19 +527,89 @@
     });
 
     document.querySelectorAll('[data-mode]').forEach(button => button.addEventListener('click', () => {
+      accountMode = button.dataset.mode;
       document.querySelectorAll('[data-mode]').forEach(item => item.classList.toggle('active', item === button));
-      byId('accountDialogTitle').textContent = button.dataset.mode === 'register' ? 'إنشاء حساب' : 'حساب المستخدم';
-      byId('accountSubmit').textContent = button.dataset.mode === 'register' ? 'إنشاء الحساب' : 'دخول';
+      const registering = accountMode === 'register';
+      byId('accountDialogTitle').textContent = registering ? 'إنشاء حساب' : 'حساب المستخدم';
+      byId('accountSubmit').textContent = registering ? 'إنشاء الحساب' : 'دخول';
+      byId('accountUsername').closest('.form-field').hidden = !registering;
+      byId('accountUsername').required = registering;
+      byId('accountPassword').autocomplete = registering ? 'new-password' : 'current-password';
+      byId('confirmPasswordField').hidden = !registering;
+      byId('accountPasswordConfirm').required = registering;
+      byId('accountPasswordConfirm').value = '';
       byId('accountError').hidden = true;
     }));
 
-    byId('accountForm').addEventListener('submit', event => {
+    byId('accountForm').addEventListener('submit', async event => {
       event.preventDefault();
       const error = byId('accountError');
-      error.textContent = 'تسجيل الحسابات يحتاج إلى إعداد خادم للموقع. لم يتم إرسال بياناتك.';
-      error.hidden = false;
+      if (accountMode === 'register' && byId('accountPassword').value !== byId('accountPasswordConfirm').value) {
+        error.textContent = 'كلمتا المرور غير متطابقتين.';
+        error.hidden = false;
+        return;
+      }
+      if (!firebaseAuth) {
+        error.textContent = 'إعداد Firebase غير مكتمل. أضف إعدادات مشروعك إلى firebase-config.js أولًا.';
+        error.hidden = false;
+        return;
+      }
+      const submit = byId('accountSubmit');
+      submit.disabled = true;
+      error.hidden = true;
+      try {
+        const email = byId('accountEmail').value.trim();
+        const password = byId('accountPassword').value;
+        if (accountMode === 'register') {
+          const credential = await firebaseAuth.createUserWithEmailAndPassword(email, password);
+          const displayName = byId('accountUsername').value.trim();
+          if (displayName) await credential.user.updateProfile({ displayName });
+          try {
+            await credential.user.sendEmailVerification();
+          } catch (verificationError) {
+            await firebaseAuth.signOut();
+            error.textContent = `تم إنشاء الحساب، لكن تعذر إرسال رابط التأكيد. ${firebaseAuthError(verificationError)}`;
+            error.hidden = false;
+            return;
+          }
+          await firebaseAuth.signOut();
+          showToast('أرسلنا رابط تأكيد إلى بريدك. افتحه لتفعيل الحساب، ثم سجّل الدخول.');
+        } else {
+          const credential = await firebaseAuth.signInWithEmailAndPassword(email, password);
+          if (!credential.user.emailVerified) {
+            let verificationSent = false;
+            try {
+              await credential.user.sendEmailVerification();
+              verificationSent = true;
+            } catch (verificationError) {
+              console.warn('تعذر إعادة إرسال رابط تأكيد البريد.', verificationError);
+            }
+            await firebaseAuth.signOut();
+            error.textContent = verificationSent
+              ? 'لم يتم تأكيد بريدك بعد. أرسلنا رابط تأكيد جديد؛ افتحه ثم سجّل الدخول.'
+              : 'يجب تأكيد بريدك قبل الدخول. افتح رسالة التأكيد، أو حاول مجددًا لاحقًا لإعادة إرسالها.';
+            error.hidden = false;
+            return;
+          }
+          showToast('تم تسجيل الدخول.');
+        }
+        closeDialog('accountDialog');
+      } catch (authError) {
+        error.textContent = firebaseAuthError(authError);
+        error.hidden = false;
+      } finally {
+        submit.disabled = false;
+      }
     });
-    byId('userLogoutButton').addEventListener('click', () => showToast('لا يوجد حساب مسجل في هذه الجلسة.'));
+    byId('userLogoutButton').addEventListener('click', async () => {
+      if (!firebaseAuth) return;
+      try {
+        await firebaseAuth.signOut();
+        showToast('تم تسجيل الخروج.');
+      } catch (authError) {
+        showToast(firebaseAuthError(authError));
+      }
+    });
     byId('loginForm').addEventListener('submit', event => {
       event.preventDefault();
       const error = byId('loginError');
