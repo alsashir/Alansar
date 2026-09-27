@@ -570,7 +570,9 @@
           await firebaseAuth.signInWithEmailAndPassword(email, password);
           showToast('تم تسجيل الدخول.');
         }
+        updateAccountUI(firebaseAuth.currentUser);
         closeDialog('accountDialog');
+        if (isAdmin) openAdmin();
       } catch (authError) {
         error.textContent = firebaseAuthError(authError);
         error.hidden = false;
