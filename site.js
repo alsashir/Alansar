@@ -32,6 +32,7 @@
   let isAdmin = false;
   let firebaseAuth = null;
   let accountMode = 'login';
+  let returnToAdminAfterLogin = false;
   let databasePromise;
   let toastTimer;
   const objectUrls = new Map();
@@ -412,8 +413,17 @@
 
   function openAdmin() {
     const panel = byId('adminPanel');
-    byId('adminSignInNotice').hidden = isAdmin;
+    const notice = byId('adminSignInNotice');
+    notice.hidden = isAdmin;
     panel.hidden = !isAdmin;
+    if (!isAdmin) {
+      const message = notice.querySelector('.form-note');
+      const user = firebaseAuth?.currentUser;
+      if (!firebaseAuth) message.textContent = 'تعذر تهيئة Firebase Authentication. تحقق من تحميل إعدادات Firebase والاتصال بالإنترنت.';
+      else if (user) message.textContent = `الحساب مسجل، لكن UID الحالي هو ${user.uid} ولا يطابق UID المشرف المحدد.`;
+      else message.textContent = 'سجّل الدخول بحساب Firebase المرتبط بمعرّف المشرف لفتح خيارات الإدارة.';
+      byId('adminAccountButton').textContent = user ? 'عرض حساب المستخدم' : 'فتح حساب المستخدم';
+    }
     openDialog('adminDialog');
   }
 
@@ -504,6 +514,7 @@
       if (firebaseAuth) firebaseAuth.signOut().catch(authError => showToast(firebaseAuthError(authError)));
     });
     byId('adminAccountButton').addEventListener('click', () => {
+      returnToAdminAfterLogin = true;
       closeDialog('adminDialog');
       openAccount();
     });
@@ -572,7 +583,10 @@
         }
         updateAccountUI(firebaseAuth.currentUser);
         closeDialog('accountDialog');
-        if (isAdmin) openAdmin();
+        if (returnToAdminAfterLogin) {
+          returnToAdminAfterLogin = false;
+          openAdmin();
+        }
       } catch (authError) {
         error.textContent = firebaseAuthError(authError);
         error.hidden = false;
