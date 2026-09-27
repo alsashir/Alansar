@@ -431,7 +431,7 @@
     try {
       const app = window.firebase.apps.length ? window.firebase.app() : window.firebase.initializeApp(config);
       firebaseAuth = app.auth();
-      firebaseAuth.onAuthStateChanged(user => updateAccountUI(user?.emailVerified ? user : null));
+      firebaseAuth.onAuthStateChanged(updateAccountUI);
       return true;
     } catch (error) {
       console.error('تعذر تهيئة Firebase Authentication.', error);
@@ -564,33 +564,9 @@
           const credential = await firebaseAuth.createUserWithEmailAndPassword(email, password);
           const displayName = byId('accountUsername').value.trim();
           if (displayName) await credential.user.updateProfile({ displayName });
-          try {
-            await credential.user.sendEmailVerification();
-          } catch (verificationError) {
-            await firebaseAuth.signOut();
-            error.textContent = `تم إنشاء الحساب، لكن تعذر إرسال رابط التأكيد. ${firebaseAuthError(verificationError)}`;
-            error.hidden = false;
-            return;
-          }
-          await firebaseAuth.signOut();
-          showToast('أرسلنا رابط تأكيد إلى بريدك. افتحه لتفعيل الحساب، ثم سجّل الدخول.');
+          showToast('تم إنشاء الحساب وتسجيل الدخول.');
         } else {
-          const credential = await firebaseAuth.signInWithEmailAndPassword(email, password);
-          if (!credential.user.emailVerified) {
-            let verificationSent = false;
-            try {
-              await credential.user.sendEmailVerification();
-              verificationSent = true;
-            } catch (verificationError) {
-              console.warn('تعذر إعادة إرسال رابط تأكيد البريد.', verificationError);
-            }
-            await firebaseAuth.signOut();
-            error.textContent = verificationSent
-              ? 'لم يتم تأكيد بريدك بعد. أرسلنا رابط تأكيد جديد؛ افتحه ثم سجّل الدخول.'
-              : 'يجب تأكيد بريدك قبل الدخول. افتح رسالة التأكيد، أو حاول مجددًا لاحقًا لإعادة إرسالها.';
-            error.hidden = false;
-            return;
-          }
+          await firebaseAuth.signInWithEmailAndPassword(email, password);
           showToast('تم تسجيل الدخول.');
         }
         closeDialog('accountDialog');
