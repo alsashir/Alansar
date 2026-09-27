@@ -411,11 +411,9 @@
   }
 
   function openAdmin() {
-    const form = byId('loginForm');
     const panel = byId('adminPanel');
-    form.hidden = false;
-    panel.hidden = true;
-    byId('loginError').hidden = true;
+    byId('adminSignInNotice').hidden = isAdmin;
+    panel.hidden = !isAdmin;
     openDialog('adminDialog');
   }
 
@@ -441,6 +439,7 @@
 
   function updateAccountUI(user) {
     const signedIn = Boolean(user);
+    isAdmin = signedIn && user.uid === 'R7891zCBcEWDS1mJQNYRSOkgaJP2';
     byId('accountForm').hidden = signedIn;
     byId('accountModes').hidden = signedIn;
     byId('userLogoutButton').hidden = !signedIn;
@@ -450,6 +449,8 @@
     byId('accountInfoEmail').textContent = signedIn ? (user.email || '') : '';
     byId('accountEntry').textContent = signedIn ? (user.displayName || 'حسابي') : 'حسابي';
     byId('accountDialogTitle').textContent = signedIn ? 'حساب المستخدم' : (accountMode === 'register' ? 'إنشاء حساب' : 'حساب المستخدم');
+    if (byId('adminDialog').open) openAdmin();
+    renderCategories();
   }
 
   function firebaseAuthError(error) {
@@ -500,11 +501,11 @@
       openDialog('categoryDialog');
     });
     byId('logoutButton').addEventListener('click', () => {
-      isAdmin = false;
-      byId('loginForm').hidden = false;
-      byId('adminPanel').hidden = true;
+      if (firebaseAuth) firebaseAuth.signOut().catch(authError => showToast(firebaseAuthError(authError)));
+    });
+    byId('adminAccountButton').addEventListener('click', () => {
       closeDialog('adminDialog');
-      renderCategories();
+      openAccount();
     });
 
     document.addEventListener('click', event => {
@@ -586,13 +587,6 @@
         showToast(firebaseAuthError(authError));
       }
     });
-    byId('loginForm').addEventListener('submit', event => {
-      event.preventDefault();
-      const error = byId('loginError');
-      error.textContent = 'تسجيل دخول المشرف غير متاح حتى يتم ربط الموقع بخادم للتحقق من الصلاحيات.';
-      error.hidden = false;
-    });
-
     byId('categoryForm').addEventListener('submit', event => {
       event.preventDefault();
       const id = byId('editingCategoryId').value;
