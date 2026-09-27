@@ -439,7 +439,7 @@
 
   function updateAccountUI(user) {
     const signedIn = Boolean(user);
-    isAdmin = signedIn && user.uid === 'R7891zCBcEWDS1mJQNYRSOkgaJP2';
+    isAdmin = signedIn && user.uid === 'R789lzCBCeWDStMjQNYRSOkgaJP2';
     byId('accountForm').hidden = signedIn;
     byId('accountModes').hidden = signedIn;
     byId('userLogoutButton').hidden = !signedIn;
