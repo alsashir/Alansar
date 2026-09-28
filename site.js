@@ -6,10 +6,13 @@
   const DATABASE_STORE = 'audio-files';
   const initialCategories = [
     { id: 'quran', name: 'القرآن الكريم', type: 'quran' },
-    { id: 'nasheed', name: 'الأناشيد', type: 'nasheed' }
+    { id: 'nasheed', name: 'الأناشيد', type: 'nasheed' },
+    { id: 'ansari-pen', name: 'قلم الأنصاري', type: 'writing' }
   ];
   const $ = (selector, root = document) => root.querySelector(selector);
   const byId = id => document.getElementById(id);
+  const CLOUDINARY_CLOUD_NAME = 'kqhoezjm';
+  const CLOUDINARY_UPLOAD_PRESET = 'my_project';
   const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
   function readState() {
     try {
@@ -25,6 +28,10 @@
 
   const state = readState();
   if (!state.categories.length) state.categories = initialCategories;
+  if (!Array.isArray(state.writings)) state.writings = [];
+  if (!state.categories.some(category => category.id === 'ansari-pen')) {
+    state.categories.push({ id: 'ansari-pen', name: 'قلم الأنصاري', type: 'writing' });
+  }
   let legacyLocalState = state.cloudSynced ? null : JSON.parse(JSON.stringify(state));
   let legacyMigrationPromise = null;
   let activeCategoryId = null;
@@ -34,10 +41,9 @@
   let isAdmin = false;
   let firebaseAuth = null;
   let firebaseFirestore = null;
-  let firebaseStorage = null;
   let cloudDocument = null;
   let cloudReady = false;
-  let cloudDocumentExists = false;
+  let remoteLibraryExists = false;
   let cloudWriteQueue = Promise.resolve();
   let cloudReadyPromise;
   let resolveCloudReady;
@@ -58,7 +64,7 @@
   }
 
   async function waitForCloudReady() {
-    if (!cloudDocument || !firebaseStorage) throw new Error('cloud-not-configured');
+    if (!cloudDocument) throw new Error('firestore-not-configured');
     if (!cloudReady) {
       let timeoutId;
       const error = await Promise.race([
@@ -73,14 +79,17 @@
   }
 
   function cloudErrorMessage(error) {
-    if (error?.message === 'cloud-not-configured') return 'المكتبة السحابية غير مهيأة. فعّل Firestore وStorage في Firebase.';
+    if (error?.message === 'firestore-not-configured') return 'قاعدة Firestore غير مهيأة.';
     if (error?.message === 'admin-sign-in-required') return 'سجّل الدخول بحساب المشرف قبل رفع الملفات أو تعديل المكتبة.';
-    if (error?.message === 'cloud-timeout') return 'انتهت مهلة الاتصال بـFirestore. تحقق من الإنترنت وتفعيل Firestore ونشر قواعده، ثم أعد المحاولة.';
-    if (error?.code === 'permission-denied') return 'رفض Firebase الحفظ. تحقق من UID المشرف وانشر قواعد Firestore وStorage.';
-    if (error?.code === 'storage/unauthorized') return 'رفض Firebase Storage رفع الملف. تحقق من UID المشرف وانشر قواعد Storage.';
-    if (error?.code === 'storage/bucket-not-found') return 'حاوية Firebase Storage غير موجودة. أنشئ Storage في مشروع Firebase وتحقق من storageBucket في الإعداد.';
-    if (error?.code === 'unavailable' || error?.code === 'storage/retry-limit-exceeded') return 'تعذر الاتصال بخدمات Firebase. تحقق من الإنترنت وحاول مجددًا.';
-    return 'تعذر حفظ بيانات المكتبة في Firebase. تحقق من تفعيل Firestore ونشر قواعده.';
+    if (error?.message === 'cloud-timeout') return 'انتهت مهلة الاتصال بقاعدة Firestore. تحقق من الاتصال والقواعد.';
+    if (error?.code === 'permission-denied') return 'رفض Firestore الحفظ. تأكد من تسجيل الدخول بحساب المشرف ونشر القواعد.';
+    if (error?.code === 'resource-exhausted') return 'تجاوزت بيانات المكتبة الحد الأقصى المسموح به في Firestore.';
+    if (error?.cloudinary) return 'رفض Cloudinary رفع الملف. تحقق من اسم الحساب والـUnsigned Preset.';
+    if (error?.status === 401) return 'انتهت جلسة الدخول. سجّل الدخول مرة أخرى.';
+    if (error?.status === 403) return 'هذا الإجراء متاح لحساب المشرف فقط.';
+    if (error?.status >= 500) return 'تعذر على Cloudinary حفظ الملف. تحقق من إعدادات الحساب والـPreset.';
+    if (error instanceof TypeError) return 'تعذر الاتصال بالخدمة. تحقق من الإنترنت وحاول مجددًا.';
+    return 'تعذر حفظ بيانات المكتبة في Firestore.';
   }
 
   async function saveState() {
@@ -89,11 +98,12 @@
       categories: state.categories,
       tracks: state.tracks,
       folders: state.folders,
+      writings: state.writings,
       updatedAt: window.firebase.firestore.FieldValue.serverTimestamp()
     }));
     cloudWriteQueue = write.catch(() => {});
     await write;
-    cloudDocumentExists = true;
+    remoteLibraryExists = true;
     saveLocalState();
   }
 
@@ -147,6 +157,10 @@
 
     for (const category of state.categories) {
       const tracks = state.tracks.filter(track => track.categoryId === category.id);
+      const isWritingCategory = category.type === 'writing';
+      const itemCount = isWritingCategory
+        ? state.writings.filter(writing => writing.categoryId === category.id).length
+        : tracks.length;
       const card = document.createElement('article');
       card.className = 'category-card';
       const open = document.createElement('button');
@@ -160,12 +174,12 @@
       label.append(document.createTextNode(category.name));
       const count = document.createElement('small');
       count.className = 'category-count';
-      count.textContent = `${tracks.length} صوت`;
+      count.textContent = `${itemCount} ${isWritingCategory ? 'موضوع' : 'صوت'}`;
       label.append(count);
       open.append(icon, label);
       open.addEventListener('click', () => openCategory(category.id));
       card.append(open);
-      if (isAdmin && !['quran', 'nasheed'].includes(category.id)) {
+      if (isAdmin && !['quran', 'nasheed', 'ansari-pen'].includes(category.id)) {
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'row-action';
@@ -179,7 +193,7 @@
       const menuButton = document.createElement('button');
       menuButton.type = 'button';
       menuButton.className = 'menu-link';
-      menuButton.textContent = `${category.name} (${tracks.length})`;
+      menuButton.textContent = `${category.name} (${itemCount})`;
       menuButton.addEventListener('click', () => {
         openCategory(category.id);
         closeDialog('menuDialog');
@@ -199,6 +213,7 @@
     if (!list) return;
     list.replaceChildren();
     for (const category of state.categories) {
+      if (category.type === 'writing') continue;
       const item = document.createElement('div');
       item.className = 'admin-category-item';
       const label = document.createElement('strong');
@@ -238,6 +253,12 @@
     const trackList = byId('categoryTracks');
     if (!category || !folderGrid || !trackList) return;
     byId('categoryTitle').textContent = category.name;
+    trackList.classList.remove('writing-list');
+    byId('addTextButton').hidden = true;
+    if (category.type === 'writing') {
+      renderWritings(category, folderGrid, trackList);
+      return;
+    }
     const folders = state.folders.filter(folder => folder.categoryId === category.id);
     folderGrid.replaceChildren();
     folderGrid.hidden = folders.length === 0;
@@ -287,6 +308,86 @@
     for (const track of visibleTracks) trackList.append(makeTrackButton(track));
   }
 
+  function renderWritings(category, folderGrid, list) {
+    folderGrid.replaceChildren();
+    folderGrid.hidden = true;
+    byId('addFolderButton').hidden = true;
+    byId('clearFolderButton').hidden = true;
+    byId('addTextButton').hidden = !isAdmin;
+    byId('categorySubtitle').textContent = 'موضوعات ومقالات';
+    list.classList.add('writing-list');
+    list.replaceChildren();
+    const writings = state.writings.filter(writing => writing.categoryId === category.id);
+    if (!writings.length) {
+      const empty = document.createElement('div');
+      empty.className = 'writing-paper writing-empty';
+      empty.textContent = isAdmin ? 'ابدأ بكتابة أول موضوع في قلم الأنصاري.' : 'لا توجد موضوعات منشورة حاليًا.';
+      list.append(empty);
+      return;
+    }
+
+    for (const writing of writings) {
+      const paper = document.createElement('article');
+      paper.className = 'writing-paper';
+      if (writing.imageUrl) {
+        const image = document.createElement('img');
+        image.className = 'writing-image';
+        image.src = writing.imageUrl;
+        image.alt = writing.title;
+        image.loading = 'lazy';
+        paper.append(image);
+      }
+      const title = document.createElement('h3');
+      title.className = 'writing-title';
+      title.textContent = writing.title;
+      const description = document.createElement('p');
+      description.className = 'writing-description';
+      description.textContent = writing.description;
+      paper.append(title, description);
+      if (isAdmin) {
+        const actions = document.createElement('div');
+        actions.className = 'writing-actions';
+        const edit = document.createElement('button');
+        edit.type = 'button';
+        edit.className = 'folder-action';
+        edit.textContent = 'تعديل';
+        edit.addEventListener('click', () => openWritingForm(writing));
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'folder-action';
+        remove.textContent = 'حذف';
+        remove.addEventListener('click', () => deleteWriting(writing));
+        actions.append(edit, remove);
+        paper.append(actions);
+      }
+      list.append(paper);
+    }
+  }
+
+  function openWritingForm(writing = null) {
+    const form = byId('writingForm');
+    form.reset();
+    byId('editingWritingId').value = writing?.id || '';
+    byId('writingDialogTitle').textContent = writing ? 'تعديل الموضوع' : 'كتابة موضوع';
+    byId('writingTitleInput').value = writing?.title || '';
+    byId('writingDescriptionInput').value = writing?.description || '';
+    byId('writingImageInput').value = '';
+    openDialog('writingDialog');
+  }
+
+  async function deleteWriting(writing) {
+    if (!confirm(`حذف موضوع «${writing.title}»؟`)) return;
+    state.writings = state.writings.filter(item => item.id !== writing.id);
+    try {
+      await saveState();
+      renderCategories();
+      renderCategoryContents();
+    } catch (error) {
+      state.writings.push(writing);
+      showToast(cloudErrorMessage(error));
+    }
+  }
+
   function makeTrackButton(track) {
     const entry = document.createElement('div');
     entry.className = 'audio-entry';
@@ -298,6 +399,14 @@
     const subtitle = document.createElement('small');
     const folder = folderById(track.folderId);
     subtitle.textContent = [track.reciter || track.description, folder?.name].filter(Boolean).join(' · ') || 'اضغط للتشغيل';
+    if (track.imageUrl) {
+      const image = document.createElement('img');
+      image.className = 'audio-image';
+      image.src = track.imageUrl;
+      image.alt = '';
+      image.loading = 'lazy';
+      button.append(image);
+    }
     button.append(title, subtitle);
     button.addEventListener('click', () => playTrack(track));
     entry.append(button);
@@ -560,8 +669,8 @@
     if (!window.firebase || !config || requiredConfig.some(key => !config[key] || config[key].startsWith('YOUR_'))) return false;
     try {
       const app = window.firebase.apps.length ? window.firebase.app() : window.firebase.initializeApp(config);
-      initializeFirebaseCloud(app);
       firebaseAuth = app.auth();
+      initializeFirebaseCloud(app);
       firebaseAuth.onAuthStateChanged(user => {
         authStateReady = true;
         updateAccountUI(user);
@@ -576,40 +685,44 @@
   function initializeFirebaseCloud(app) {
     try {
       firebaseFirestore = app.firestore();
-      firebaseStorage = app.storage();
       cloudDocument = firebaseFirestore.collection('libraries').doc('public');
       cloudReadyPromise = new Promise(resolve => { resolveCloudReady = resolve; });
       cloudDocument.onSnapshot({ includeMetadataChanges: true }, snapshot => {
         if (snapshot.metadata.fromCache) return;
-        cloudReady = true;
-        resolveCloudReady(null);
-        cloudDocumentExists = snapshot.exists;
+        remoteLibraryExists = snapshot.exists;
         if (snapshot.exists) {
           const remoteState = snapshot.data();
-          if (Array.isArray(remoteState.categories) && Array.isArray(remoteState.tracks) && Array.isArray(remoteState.folders)) {
-            state.categories = remoteState.categories;
-            state.tracks = remoteState.tracks;
-            state.folders = remoteState.folders;
-            if (!legacyLocalState || isAdmin) saveLocalState();
-            renderCategories();
-            if (activeCategoryId && categoryById(activeCategoryId)) renderCategoryContents();
-            else if (activeCategoryId) goHome();
+          if (!Array.isArray(remoteState.categories) || !Array.isArray(remoteState.tracks)
+            || !Array.isArray(remoteState.folders)) return;
+          state.categories = remoteState.categories;
+          state.tracks = remoteState.tracks;
+          state.folders = remoteState.folders;
+          state.writings = Array.isArray(remoteState.writings) ? remoteState.writings : [];
+          if (!state.categories.some(category => category.id === 'ansari-pen')) {
+            state.categories.push({ id: 'ansari-pen', name: 'قلم الأنصاري', type: 'writing' });
           }
+          if (!legacyLocalState || isAdmin) saveLocalState();
+          renderCategories();
+          if (activeCategoryId && categoryById(activeCategoryId)) renderCategoryContents();
+          else if (activeCategoryId) goHome();
         } else {
           state.categories = [...initialCategories];
           state.tracks = [];
           state.folders = [];
+          state.writings = [];
           renderCategories();
         }
+        cloudReady = true;
+        resolveCloudReady?.(null);
         if (isAdmin) migrateLegacyLocalLibrary();
       }, error => {
-        resolveCloudReady(error);
-        console.error('تعذر تحميل المكتبة المشتركة من Firebase.', error);
+        resolveCloudReady?.(error);
+        console.error('تعذر تحميل المكتبة من Firestore.', error);
         showToast(cloudErrorMessage(error));
       });
     } catch (error) {
-      console.error('تعذر تهيئة Firestore أو Storage.', error);
-      showToast('فعّل Firestore وStorage في مشروع Firebase أولًا.');
+      console.error('تعذر تهيئة Firestore.', error);
+      showToast('تحقق من تفعيل Firestore في مشروع Firebase.');
     }
   }
 
@@ -645,6 +758,28 @@
     return messages[error.code] || 'تعذر إكمال العملية. تحقق من إعداد Firebase ثم حاول مجددًا.';
   }
 
+  async function uploadToCloudinary(file) {
+    const form = new FormData();
+    form.append('file', file);
+    form.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+    const response = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/auto/upload`, {
+      method: 'POST',
+      body: form
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = data.error?.message || 'Cloudinary upload failed.';
+      alert(`سبب رفض Cloudinary: ${message}`);
+      console.error('Cloudinary details:', data);
+      const error = new Error(message);
+      error.status = response.status;
+      error.cloudinary = true;
+      throw error;
+    }
+    if (!data.secure_url || !data.public_id) throw new Error('Cloudinary did not return a secure asset URL.');
+    return { publicId: data.public_id, secureUrl: data.secure_url, resourceType: data.resource_type };
+  }
+
   function initialize() {
     initializeFirebaseAuth();
     const date = byId('todayDate');
@@ -663,6 +798,7 @@
       populateFolderCategory(byId('folderCategoryInput'), activeCategoryId);
       openDialog('folderDialog');
     });
+    byId('addTextButton').addEventListener('click', () => openWritingForm());
     byId('clearFolderButton').addEventListener('click', () => {
       activeFolderId = null;
       byId('categorySubtitle').textContent = 'قائمة الصوتيات';
@@ -791,7 +927,7 @@
         else state.categories = state.categories.filter(category => category.id !== newCategory.id);
         renderCategories();
         if (activeCategoryId) renderCategoryContents();
-        console.error('تعذر مزامنة القائمة مع Firestore.', error);
+        console.error('تعذر مزامنة القائمة مع Cloudinary.', error);
         showToast(cloudErrorMessage(error));
       }
     });
@@ -817,8 +953,61 @@
         else state.folders = state.folders.filter(folder => folder.id !== newFolder.id);
         renderCategories();
         if (activeCategoryId) renderCategoryContents();
-        console.error('تعذر مزامنة المجلد مع Firestore.', error);
+        console.error('تعذر مزامنة المجلد مع Cloudinary.', error);
         showToast(cloudErrorMessage(error));
+      }
+    });
+
+    byId('writingForm').addEventListener('submit', async event => {
+      event.preventDefault();
+      if (!isAdmin) {
+        showToast('الكتابة متاحة للمشرف فقط.');
+        return;
+      }
+      const id = byId('editingWritingId').value;
+      const existing = state.writings.find(item => item.id === id);
+      const originalWriting = existing ? { ...existing } : null;
+      const imageFile = byId('writingImageInput').files[0];
+      let imageUrl = existing?.imageUrl || '';
+      let imageId = existing?.imageId || '';
+      const writing = {
+        id: existing?.id || makeId(),
+        categoryId: 'ansari-pen',
+        title: byId('writingTitleInput').value.trim(),
+        description: byId('writingDescriptionInput').value.trim(),
+        createdAt: existing?.createdAt || Date.now(),
+        imageUrl,
+        imageId
+      };
+      const submit = byId('writingForm').querySelector('button[type="submit"]');
+      const status = byId('writingSaveStatus');
+      submit.disabled = true;
+      status.hidden = false;
+      try {
+        await waitForCloudReady();
+        if (imageFile) {
+          status.textContent = 'جارٍ رفع صورة الموضوع إلى Cloudinary...';
+          const uploaded = await uploadToCloudinary(imageFile);
+          writing.imageUrl = uploaded.secureUrl;
+          writing.imageId = uploaded.publicId;
+        }
+        if (existing) Object.assign(existing, writing);
+        else state.writings.push(writing);
+        status.textContent = 'جارٍ نشر الموضوع للمشاهدين...';
+        await saveState();
+        closeDialog('writingDialog');
+        renderCategories();
+        renderCategoryContents();
+        showToast('تم نشر الموضوع في قلم الأنصاري.');
+      } catch (error) {
+        if (existing && originalWriting) Object.assign(existing, originalWriting);
+        else state.writings = state.writings.filter(item => item.id !== writing.id);
+        renderCategories();
+        renderCategoryContents();
+        status.textContent = cloudErrorMessage(error);
+        showToast(cloudErrorMessage(error));
+      } finally {
+        submit.disabled = false;
       }
     });
 
@@ -830,12 +1019,15 @@
       const editingId = byId('editingTrackId').value;
       const existing = state.tracks.find(track => track.id === editingId);
       const file = byId('trackAudioInput').files[0];
+      const imageFile = byId('trackImageInput').files[0];
       if (!existing && !file) {
         showToast('اختر ملفًا صوتيًا أولًا.');
         return;
       }
       let audioId = existing?.audioId || '';
       let audioUrl = existing?.audioUrl || '';
+      let imageId = existing?.imageId || '';
+      let imageUrl = existing?.imageUrl || '';
       submitButton.disabled = true;
       submitButton.textContent = 'جارٍ الاتصال...';
       status.hidden = false;
@@ -843,18 +1035,17 @@
       try {
         await waitForCloudReady();
         if (file) {
-          status.textContent = 'جارٍ رفع الملف الصوتي إلى Firebase Storage...';
-          const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-          audioId = `library-audio/${makeId()}-${safeName}`;
-          const audioReference = firebaseStorage.ref().child(audioId);
-          const uploadTask = audioReference.put(file, { contentType: file.type || 'audio/mpeg' });
-          await new Promise((resolve, reject) => uploadTask.on('state_changed', snapshot => {
-            const percent = Math.round(snapshot.bytesTransferred / snapshot.totalBytes * 100);
-            status.textContent = `جارٍ رفع الملف الصوتي إلى Firebase Storage... ${percent}%`;
-            submitButton.textContent = `جارٍ الرفع ${percent}%`;
-          }, reject, resolve));
-          audioUrl = await audioReference.getDownloadURL();
-          if (existing?.audioId) deleteAudio(existing.audioId);
+          status.textContent = 'جارٍ رفع الملف الصوتي إلى Cloudinary...';
+          submitButton.textContent = 'جارٍ الرفع...';
+          const uploaded = await uploadToCloudinary(file);
+          audioId = uploaded.publicId;
+          audioUrl = uploaded.secureUrl;
+        }
+        if (imageFile) {
+          status.textContent = 'جارٍ رفع صورة الغلاف إلى Cloudinary...';
+          const uploaded = await uploadToCloudinary(imageFile);
+          imageId = uploaded.publicId;
+          imageUrl = uploaded.secureUrl;
         }
       } catch (error) {
         console.error(error);
@@ -872,7 +1063,9 @@
         folderId: byId('trackFolderInput').value,
         reciter: byId('trackReciterInput').value.trim(),
         audioId,
-        audioUrl
+        audioUrl,
+        imageId,
+        imageUrl
       };
       const originalTrack = existing ? { ...existing } : null;
       if (existing) Object.assign(existing, track);
@@ -891,7 +1084,7 @@
         else state.tracks = state.tracks.filter(item => item.id !== track.id);
         renderCategories();
         if (activeCategoryId) renderCategoryContents();
-        console.error('تعذر مزامنة الصوت مع Firestore.', error);
+        console.error('تعذر مزامنة الصوت مع Cloudinary.', error);
         status.textContent = cloudErrorMessage(error);
         showToast(cloudErrorMessage(error));
       } finally {
@@ -994,13 +1187,13 @@
   }
 
   async function migrateLegacyLocalLibrary() {
-    if (!isAdmin || !cloudReady || !cloudDocument || legacyMigrationPromise) return;
+    if (!isAdmin || !cloudReady || legacyMigrationPromise) return;
     if (!legacyLocalState) {
-      if (!cloudDocumentExists) {
+      if (!remoteLibraryExists) {
         try {
           await saveState();
         } catch (error) {
-          console.error('تعذر إنشاء المكتبة المشتركة في Firestore.', error);
+          console.error('تعذر إنشاء المكتبة المشتركة في Cloudinary.', error);
           showToast(cloudErrorMessage(error));
         }
       }
@@ -1028,15 +1221,21 @@
       for (const localTrack of legacyLocalState.tracks) {
         if (tracks.has(localTrack.id)) continue;
         const track = { ...localTrack };
-        if (!track.audioUrl && track.audioId) {
-          const localAudio = await getAudio(track.audioId).catch(() => null);
+        const hasLegacyStorageUrl = track.audioUrl?.includes('firebasestorage.googleapis.com');
+        if (!track.audioUrl || hasLegacyStorageUrl) {
+          let localAudio = track.audioId ? await getAudio(track.audioId).catch(() => null) : null;
+          if (!localAudio && hasLegacyStorageUrl) {
+            try {
+              const response = await fetch(track.audioUrl);
+              if (response.ok) localAudio = await response.blob();
+            } catch (error) {
+              console.warn(`تعذر تنزيل الملف القديم للصوت: ${track.title}`, error);
+            }
+          }
           if (localAudio) {
-            const extension = localAudio.type?.split('/')[1]?.replace(/[^a-zA-Z0-9]/g, '') || 'mp3';
-            const remoteAudioId = `library-audio/${makeId()}.${extension}`;
-            const reference = firebaseStorage.ref().child(remoteAudioId);
-            await reference.put(localAudio, { contentType: localAudio.type || 'audio/mpeg' });
-            track.audioId = remoteAudioId;
-            track.audioUrl = await reference.getDownloadURL();
+            const uploaded = await uploadToCloudinary(localAudio);
+            track.audioId = uploaded.publicId;
+            track.audioUrl = uploaded.secureUrl;
           } else {
             console.warn(`تعذر العثور على الملف المحلي للصوت: ${track.title}`);
             continue;
@@ -1052,7 +1251,7 @@
       if (activeCategoryId && categoryById(activeCategoryId)) renderCategoryContents();
       showToast('تمت مزامنة الملفات القديمة مع المكتبة المشتركة.');
     })().catch(error => {
-      console.error('تعذر ترحيل الملفات المحلية إلى Firebase.', error);
+      console.error('تعذر ترحيل الملفات المحلية إلى Cloudinary.', error);
       showToast(cloudErrorMessage(error));
     }).finally(() => {
       legacyMigrationPromise = null;
@@ -1064,10 +1263,6 @@
     const url = objectUrls.get(id);
     if (url) URL.revokeObjectURL(url);
     objectUrls.delete(id);
-    if (id.startsWith('library-audio/') && firebaseStorage && isAdmin) {
-      firebaseStorage.ref().child(id).delete().catch(error => console.warn('تعذر حذف الملف من Firebase Storage.', error));
-      return;
-    }
     try {
       const database = await openDatabase();
       const transaction = database.transaction(DATABASE_STORE, 'readwrite');

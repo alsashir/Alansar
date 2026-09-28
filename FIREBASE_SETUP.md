@@ -1,18 +1,18 @@
-# تفعيل المكتبة المشتركة
+# إعداد Cloudinary وFirestore
 
-1. من Firebase Console للمشروع `alansari-a8524`، أنشئ قاعدة Firestore وفعّل Firebase Storage.
-2. فعّل تسجيل الدخول بالبريد وكلمة المرور في Authentication. يجب أن يكون حساب المشرف هو الحساب ذو UID المحدد في `site.js` وملفي القواعد.
-3. ثبّت Firebase CLI وسجّل الدخول به، ثم من مجلد المشروع انشر القواعد:
+ترفع الصفحة الصوتيات والصور مباشرة من المتصفح إلى Cloudinary باستخدام `Unsigned upload preset`، ثم تحفظ قيمة `secure_url` وبيانات الملف في مستند المكتبة على Firestore. لا تحتاج Firebase Cloud Functions أو API Secret.
+
+1. في Cloudinary استخدم `Cloud name` بقيمة `kqhoezjm`، واضبط preset `my_project` على `Unsigned`. اسمح بالصيغ الصوتية والصورية المطلوبة وحدد حدًا لحجم الملف؛ كل من يعرف اسم الحساب والـpreset يستطيع محاولة رفع ملفات وفق هذه الإعدادات.
+2. في Firebase فعّل Firestore وAuthentication بالبريد وكلمة المرور. حساب المشرف يجب أن يطابق UID الموجود في `site.js` و`firestore.rules`.
+3. انشر قواعد Firestore والواجهة الثابتة:
 
 ```powershell
 firebase login
-firebase deploy --project alansari-a8524 --only firestore:rules,storage
+firebase deploy --only firestore:rules,hosting --project alansari-a8524
 ```
 
-4. للسماح بتنزيل الصوت من المتصفح، ثبّت Google Cloud CLI وسجّل الدخول إلى المشروع، ثم طبّق إعداد CORS:
+4. افتح `https://alansari-a8524.web.app`. للمصادقة أثناء التطوير المحلي، أضف `localhost` و`127.0.0.1` إلى Authorized domains في Firebase Authentication.
 
-```powershell
-gcloud storage buckets update gs://alansari-a8524.firebasestorage.app --cors-file=storage-cors.json
-```
+قواعد Firestore تسمح بالقراءة العامة وتقيّد كتابة المكتبة بحساب المشرف. حفظ المكتبة حاليًا في مستند واحد؛ حد Firestore للمستند 1 MiB. رفع أو استبدال ملف في Cloudinary يعيد `secure_url`، ويحفظ الرابط في بيانات الصوت أو الموضوع. يتطلب نشر قواعد Firestore إنشاء قاعدة بيانات Firestore في المشروع أولًا.
 
-تسمح القواعد للجميع بقراءة المكتبة والاستماع للصوت، وتقصر الإضافة والتعديل والحذف على حساب المشرف. الحد الأقصى لملف الصوت 100 ميجابايت. بعد نشر نسخة الصفحة التي تتضمن التغييرات، تتم مزامنة القوائم والمجلدات تلقائيًا، ويمكن الاستماع للصوت أو تنزيله.
+الرفع المباشر بنمط Unsigned لا يستخدم سرًا، لكنه يجعل preset نقطة رفع عامة؛ قيود أنواع الملفات والحجم في إعداد preset مهمة. حذف سجل من المكتبة لا يحذف الملف الأصلي من Cloudinary لأن ذلك يتطلب API Secret على خادم، وليس في المتصفح.
