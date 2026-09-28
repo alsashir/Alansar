@@ -64,7 +64,7 @@
       const error = await Promise.race([
         cloudReadyPromise,
         new Promise(resolve => {
-          timeoutId = setTimeout(() => resolve(new Error('cloud-timeout')), 15000);
+          timeoutId = setTimeout(() => resolve(new Error('cloud-timeout')), 8000);
         })
       ]).finally(() => clearTimeout(timeoutId));
       if (error) throw error;
@@ -826,6 +826,7 @@
       event.preventDefault();
       const submitButton = byId('trackForm').querySelector('button[type="submit"]');
       const status = byId('trackSaveStatus');
+      const submitLabel = submitButton.textContent;
       const editingId = byId('editingTrackId').value;
       const existing = state.tracks.find(track => track.id === editingId);
       const file = byId('trackAudioInput').files[0];
@@ -836,6 +837,7 @@
       let audioId = existing?.audioId || '';
       let audioUrl = existing?.audioUrl || '';
       submitButton.disabled = true;
+      submitButton.textContent = 'جارٍ الاتصال...';
       status.hidden = false;
       status.textContent = 'جارٍ الاتصال بالمكتبة المشتركة...';
       try {
@@ -849,6 +851,7 @@
           await new Promise((resolve, reject) => uploadTask.on('state_changed', snapshot => {
             const percent = Math.round(snapshot.bytesTransferred / snapshot.totalBytes * 100);
             status.textContent = `جارٍ رفع الملف الصوتي إلى Firebase Storage... ${percent}%`;
+            submitButton.textContent = `جارٍ الرفع ${percent}%`;
           }, reject, resolve));
           audioUrl = await audioReference.getDownloadURL();
           if (existing?.audioId) deleteAudio(existing.audioId);
@@ -858,6 +861,7 @@
         status.textContent = cloudErrorMessage(error);
         showToast(cloudErrorMessage(error));
         submitButton.disabled = false;
+        submitButton.textContent = submitLabel;
         return;
       }
       const track = {
@@ -875,6 +879,7 @@
       else state.tracks.push(track);
       try {
         status.textContent = 'تم رفع الملف. جارٍ نشر بياناته على بقية الأجهزة...';
+        submitButton.textContent = 'جارٍ النشر...';
         await saveState();
         status.hidden = true;
         closeDialog('trackDialog');
@@ -891,6 +896,7 @@
         showToast(cloudErrorMessage(error));
       } finally {
         submitButton.disabled = false;
+        submitButton.textContent = submitLabel;
       }
     });
 
