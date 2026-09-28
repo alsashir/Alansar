@@ -31,6 +31,12 @@
   let currentTrackId = null;
   let isAdmin = false;
   let firebaseAuth = null;
+  let firebaseFirestore = null;
+  let firebaseStorage = null;
+  let cloudDocument = null;
+  let cloudReady = false;
+  let cloudDocumentExists = false;
+  let cloudWriteQueue = Promise.resolve();
   let authStateReady = false;
   let accountMode = 'login';
   let returnToAdminAfterLogin = false;
@@ -38,13 +44,27 @@
   let toastTimer;
   const objectUrls = new Map();
 
-  function saveState() {
+  function saveLocalState() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (error) {
       showToast('تعذر حفظ البيانات في هذا المتصفح.');
       console.error(error);
     }
+  }
+
+  function saveState() {
+    saveLocalState();
+    if (!cloudDocument || !cloudReady || !isAdmin) return;
+    cloudWriteQueue = cloudWriteQueue.then(() => cloudDocument.set({
+      categories: state.categories,
+      tracks: state.tracks,
+      folders: state.folders,
+      updatedAt: window.firebase.firestore.FieldValue.serverTimestamp()
+    })).catch(error => {
+      console.error('تعذرت مزامنة المكتبة مع Firebase.', error);
+      showToast('تعذرت مزامنة المكتبة. تحقق من قواعد Firebase والاتصال.');
+    });
   }
 
   function showToast(message) {
@@ -247,10 +267,21 @@
     title.textContent = track.title;
     const subtitle = document.createElement('small');
     const folder = folderById(track.folderId);
-    subtitle.textContent = [track.reciter, folder?.name].filter(Boolean).join(' · ') || 'اضغط للتشغيل';
+    subtitle.textContent = [track.reciter || track.description, folder?.name].filter(Boolean).join(' · ') || 'اضغط للتشغيل';
     button.append(title, subtitle);
     button.addEventListener('click', () => playTrack(track));
     entry.append(button);
+
+    if (track.audioUrl || track.audioId) {
+      const download = document.createElement('button');
+      download.type = 'button';
+      download.className = 'row-action';
+      download.setAttribute('aria-label', `تنزيل ${track.title}`);
+      download.title = 'تنزيل الصوت';
+      download.append(createIcon('download'));
+      download.addEventListener('click', () => downloadTrack(track));
+      entry.append(download);
+    }
 
     if (isAdmin) {
       const edit = document.createElement('button');
@@ -304,28 +335,59 @@
 
   async function playTrack(track) {
     const audio = byId('audio');
-    if (!track.audioId) {
+    if (!track.audioUrl && !track.audioId) {
       showToast('هذا العنصر لا يحتوي على ملف صوتي.');
       return;
     }
     try {
-      const blob = await getAudio(track.audioId);
-      if (!blob) throw new Error('ملف الصوت غير موجود');
-      let url = objectUrls.get(track.audioId);
+      let url = track.audioUrl;
       if (!url) {
-        url = URL.createObjectURL(blob);
-        objectUrls.set(track.audioId, url);
+        const blob = await getAudio(track.audioId);
+        if (!blob) throw new Error('ملف الصوت غير موجود');
+        url = objectUrls.get(track.audioId);
+        if (!url) {
+          url = URL.createObjectURL(blob);
+          objectUrls.set(track.audioId, url);
+        }
       }
       currentTrackId = track.id;
       audio.src = url;
       byId('playerTitle').textContent = track.title;
-      byId('playerReciter').textContent = track.reciter || categoryById(track.categoryId)?.name || 'مكتبة الأنصاري';
+      const metadata = track.reciter || track.description || categoryById(track.categoryId)?.name || 'مكتبة الأنصاري';
+      byId('playerReciter').textContent = metadata;
+      byId('featuredTitle').textContent = track.title;
+      byId('featuredReciter').textContent = metadata;
       byId('player').hidden = false;
       await audio.play();
       updatePlaybackButton();
     } catch (error) {
       console.error(error);
       showToast('تعذر تشغيل الملف الصوتي.');
+    }
+  }
+
+  async function downloadTrack(track) {
+    try {
+      let blob;
+      if (track.audioUrl) {
+        const response = await fetch(track.audioUrl);
+        if (!response.ok) throw new Error('تعذر تنزيل الملف');
+        blob = await response.blob();
+      } else {
+        blob = await getAudio(track.audioId);
+      }
+      if (!blob) throw new Error('ملف الصوت غير موجود');
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${track.title.replace(/[\\/:*?"<>|]/g, '_')}.${blob.type.includes('mpeg') ? 'mp3' : 'audio'}`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      console.error(error);
+      showToast('تعذر تنزيل الملف الصوتي.');
     }
   }
 
@@ -453,6 +515,7 @@
     if (!window.firebase || !config || requiredConfig.some(key => !config[key] || config[key].startsWith('YOUR_'))) return false;
     try {
       const app = window.firebase.apps.length ? window.firebase.app() : window.firebase.initializeApp(config);
+      initializeFirebaseCloud(app);
       firebaseAuth = app.auth();
       firebaseAuth.onAuthStateChanged(user => {
         authStateReady = true;
@@ -465,9 +528,42 @@
     }
   }
 
+  function initializeFirebaseCloud(app) {
+    try {
+      firebaseFirestore = app.firestore();
+      firebaseStorage = app.storage();
+      cloudDocument = firebaseFirestore.collection('libraries').doc('public');
+      cloudDocument.onSnapshot(snapshot => {
+        cloudReady = true;
+        cloudDocumentExists = snapshot.exists;
+        if (snapshot.exists) {
+          const remoteState = snapshot.data();
+          if (Array.isArray(remoteState.categories) && Array.isArray(remoteState.tracks) && Array.isArray(remoteState.folders)) {
+            state.categories = remoteState.categories;
+            state.tracks = remoteState.tracks;
+            state.folders = remoteState.folders;
+            saveLocalState();
+            renderCategories();
+            if (activeCategoryId && categoryById(activeCategoryId)) renderCategoryContents();
+            else if (activeCategoryId) goHome();
+          }
+        } else if (isAdmin) {
+          saveState();
+        }
+      }, error => {
+        console.error('تعذر تحميل المكتبة المشتركة من Firebase.', error);
+        showToast('تعذر تحميل المكتبة المشتركة. تحقق من إعدادات Firebase.');
+      });
+    } catch (error) {
+      console.error('تعذر تهيئة Firestore أو Storage.', error);
+      showToast('فعّل Firestore وStorage في مشروع Firebase أولًا.');
+    }
+  }
+
   function updateAccountUI(user) {
     const signedIn = Boolean(user);
     isAdmin = signedIn && user.uid === 'R789lzCBCeWDStMjQNYRSOkgaJP2';
+    if (cloudReady && !cloudDocumentExists && isAdmin) saveState();
     byId('accountForm').hidden = signedIn;
     byId('accountModes').hidden = signedIn;
     byId('userLogoutButton').hidden = !signedIn;
@@ -661,15 +757,20 @@
         return;
       }
       let audioId = existing?.audioId || '';
+      let audioUrl = existing?.audioUrl || '';
       try {
         if (file) {
-          audioId = makeId();
-          await putAudio(audioId, file);
+          if (!firebaseStorage || !firebaseAuth?.currentUser || !isAdmin) throw new Error('Firebase Storage is unavailable or the user is not an administrator.');
+          const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          audioId = `library-audio/${makeId()}-${safeName}`;
+          const audioReference = firebaseStorage.ref().child(audioId);
+          await audioReference.put(file, { contentType: file.type || 'audio/mpeg' });
+          audioUrl = await audioReference.getDownloadURL();
           if (existing?.audioId) deleteAudio(existing.audioId);
         }
       } catch (error) {
         console.error(error);
-        showToast('تعذر حفظ الملف الصوتي في هذا المتصفح.');
+        showToast('تعذر رفع الملف إلى Firebase Storage. تحقق من تفعيل Storage وقواعده.');
         return;
       }
       const track = {
@@ -679,7 +780,8 @@
         categoryId: byId('trackCategoryInput').value,
         folderId: byId('trackFolderInput').value,
         reciter: byId('trackReciterInput').value.trim(),
-        audioId
+        audioId,
+        audioUrl
       };
       if (existing) Object.assign(existing, track);
       else state.tracks.push(track);
@@ -716,6 +818,15 @@
       }
       if (audio.paused) audio.play().catch(() => showToast('تعذر تشغيل الصوت.'));
       else audio.pause();
+    });
+    byId('closePlayer').addEventListener('click', () => {
+      const audio = byId('audio');
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      currentTrackId = null;
+      byId('player').hidden = true;
+      updateTimeline();
     });
     byId('previousButton').addEventListener('click', () => changeTrack(-1));
     byId('nextButton').addEventListener('click', () => changeTrack(1));
@@ -778,6 +889,10 @@
     const url = objectUrls.get(id);
     if (url) URL.revokeObjectURL(url);
     objectUrls.delete(id);
+    if (id.startsWith('library-audio/') && firebaseStorage && isAdmin) {
+      firebaseStorage.ref().child(id).delete().catch(error => console.warn('تعذر حذف الملف من Firebase Storage.', error));
+      return;
+    }
     try {
       const database = await openDatabase();
       const transaction = database.transaction(DATABASE_STORE, 'readwrite');
