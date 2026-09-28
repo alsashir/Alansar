@@ -60,7 +60,13 @@
   async function waitForCloudReady() {
     if (!cloudDocument || !firebaseStorage) throw new Error('cloud-not-configured');
     if (!cloudReady) {
-      const error = await cloudReadyPromise;
+      let timeoutId;
+      const error = await Promise.race([
+        cloudReadyPromise,
+        new Promise(resolve => {
+          timeoutId = setTimeout(() => resolve(new Error('cloud-timeout')), 15000);
+        })
+      ]).finally(() => clearTimeout(timeoutId));
       if (error) throw error;
     }
     if (!isAdmin || !firebaseAuth?.currentUser) throw new Error('admin-sign-in-required');
@@ -69,7 +75,10 @@
   function cloudErrorMessage(error) {
     if (error?.message === 'cloud-not-configured') return 'المكتبة السحابية غير مهيأة. فعّل Firestore وStorage في Firebase.';
     if (error?.message === 'admin-sign-in-required') return 'سجّل الدخول بحساب المشرف قبل رفع الملفات أو تعديل المكتبة.';
+    if (error?.message === 'cloud-timeout') return 'انتهت مهلة الاتصال بـFirestore. تحقق من الإنترنت وتفعيل Firestore ونشر قواعده، ثم أعد المحاولة.';
     if (error?.code === 'permission-denied') return 'رفض Firebase الحفظ. تحقق من UID المشرف وانشر قواعد Firestore وStorage.';
+    if (error?.code === 'storage/unauthorized') return 'رفض Firebase Storage رفع الملف. تحقق من UID المشرف وانشر قواعد Storage.';
+    if (error?.code === 'storage/bucket-not-found') return 'حاوية Firebase Storage غير موجودة. أنشئ Storage في مشروع Firebase وتحقق من storageBucket في الإعداد.';
     if (error?.code === 'unavailable' || error?.code === 'storage/retry-limit-exceeded') return 'تعذر الاتصال بخدمات Firebase. تحقق من الإنترنت وحاول مجددًا.';
     return 'تعذر حفظ بيانات المكتبة في Firebase. تحقق من تفعيل Firestore ونشر قواعده.';
   }
@@ -325,6 +334,8 @@
   function openTrackForm(track = null) {
     const form = byId('trackForm');
     form.reset();
+    byId('trackSaveStatus').hidden = true;
+    byId('trackSaveStatus').textContent = '';
     byId('editingTrackId').value = track?.id || '';
     byId('trackDialogTitle').textContent = track ? 'تعديل صوت' : 'إضافة صوت';
     const categorySelect = byId('trackCategoryInput');
@@ -813,6 +824,8 @@
 
     byId('trackForm').addEventListener('submit', async event => {
       event.preventDefault();
+      const submitButton = byId('trackForm').querySelector('button[type="submit"]');
+      const status = byId('trackSaveStatus');
       const editingId = byId('editingTrackId').value;
       const existing = state.tracks.find(track => track.id === editingId);
       const file = byId('trackAudioInput').files[0];
@@ -822,19 +835,29 @@
       }
       let audioId = existing?.audioId || '';
       let audioUrl = existing?.audioUrl || '';
+      submitButton.disabled = true;
+      status.hidden = false;
+      status.textContent = 'جارٍ الاتصال بالمكتبة المشتركة...';
       try {
         await waitForCloudReady();
         if (file) {
+          status.textContent = 'جارٍ رفع الملف الصوتي إلى Firebase Storage...';
           const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
           audioId = `library-audio/${makeId()}-${safeName}`;
           const audioReference = firebaseStorage.ref().child(audioId);
-          await audioReference.put(file, { contentType: file.type || 'audio/mpeg' });
+          const uploadTask = audioReference.put(file, { contentType: file.type || 'audio/mpeg' });
+          await new Promise((resolve, reject) => uploadTask.on('state_changed', snapshot => {
+            const percent = Math.round(snapshot.bytesTransferred / snapshot.totalBytes * 100);
+            status.textContent = `جارٍ رفع الملف الصوتي إلى Firebase Storage... ${percent}%`;
+          }, reject, resolve));
           audioUrl = await audioReference.getDownloadURL();
           if (existing?.audioId) deleteAudio(existing.audioId);
         }
       } catch (error) {
         console.error(error);
-        showToast('تعذر رفع الملف إلى Firebase Storage. تحقق من تفعيل Storage وقواعده.');
+        status.textContent = cloudErrorMessage(error);
+        showToast(cloudErrorMessage(error));
+        submitButton.disabled = false;
         return;
       }
       const track = {
@@ -851,7 +874,9 @@
       if (existing) Object.assign(existing, track);
       else state.tracks.push(track);
       try {
+        status.textContent = 'تم رفع الملف. جارٍ نشر بياناته على بقية الأجهزة...';
         await saveState();
+        status.hidden = true;
         closeDialog('trackDialog');
         renderCategories();
         if (activeCategoryId) renderCategoryContents();
@@ -862,7 +887,10 @@
         renderCategories();
         if (activeCategoryId) renderCategoryContents();
         console.error('تعذر مزامنة الصوت مع Firestore.', error);
+        status.textContent = cloudErrorMessage(error);
         showToast(cloudErrorMessage(error));
+      } finally {
+        submitButton.disabled = false;
       }
     });
 
